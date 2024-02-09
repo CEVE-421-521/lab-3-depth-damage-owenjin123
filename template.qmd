@@ -1,7 +1,7 @@
 ---
 title: "Lab 3: Depth-Damage Models"
 subtitle: "DataFrames and Distributions"
-author: "Your Name"
+author: "Owen Jin"
 date: 2024-01-26
 week: 3
 categories: [Lab]
@@ -25,19 +25,19 @@ format:
 
     # YOU CAN DO PDF OR DOCX BUT NOT BOTH
     # IF YOU UNCOMMENT docx, COMMENT OR DELETE pdf
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
-        number-sections: true
-        code-line-numbers: true
-
-    #docx: 
-    #    toc: true
-    #    fig-format: png
+    #pdf:
+    #    documentclass: article
+    #    fontsize: 11pt
+    #    geometry:
+    #        - margin=1in  
     #    number-sections: true
     #    code-line-numbers: true
+
+    docx: 
+        toc: true
+        fig-format: png
+        number-sections: true
+        code-line-numbers: true
 
 date-format: "ddd., MMM. D"
 ---
@@ -56,10 +56,155 @@ using Unitful
 Plots.default(; margin=6Plots.mm)
 ```
 
-# Site information
+Pick a site. For your final project, we will develop a decision support tool around the question of whether a building subject to coastal flooding should be elevated. For future analyses to run smoothly, you should pick a building that is near a water gauge with a long record – I suggest Sewells Point, VA or Galveston Pier 21, TX, but feel free to find another gauge. You can change sites later, but you’ll need to re-do this analysis. Once you have chosen your site, make sure there’s a long record of extreme water levels (not many gaps) by clicking Tides/Water Levels and then Extreme Water Levels. You should get something that looks like this. Indicate which site you have chosen.
 
+Pick a building. Find the gauge on Google Maps, and then find a building that is near the gauge. Define what you mean by “near”, but the building should not be too far inland. Indicate which building you have chosen.
+
+Find the building’s elevation. Find the elevation of the building. You can do this with USGS data following these instructions. Record your estimate.
+
+Find the building’s depth-damage data. Find a depth-damage function for your building. Use one of the depth-damage functions in haz_fl_dept.csv. Read the documemtation and make sure you understand what it means. Explain why this is an appropriate depth-damage function to use.
+
+Build the depth-damage curve. Use the tools we have built in this workshop to build a depth-damage curve for your building. Plot the curve in 1 inch increments from -10 to 30 feet, as above. Explain what it means.
+
+Implement the Monte Carlo algorithm described above to estimate the expected annual damages. Use 1,000,000 samples. Explain what this means.
+
+# Site information
+```{julia}
+haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame)
+first(haz_fl_dept, 5)
+
+include("depthdamage.jl")
+
+site = @rsubset(
+    haz_fl_dept, :Source == "USACE - Galveston", :Description == "Hotel, structure"
+)[
+    1, :,
+]
+dd = DepthDamageData(site)
+
+fieldnames(typeof(dd))
+
+scatter(
+    dd.depths,
+    dd.damages;
+    xlabel="Flood Depth at Hotel",
+    ylabel="Damage (%)",
+    label="$(dd.description) ($(dd.source))",
+    legend=:bottomright,
+    size=(700, 500),
+)
+```
 # Depth-Damage
+```{julia}
+itp = let
+    depth_ft = ustrip.(u"ft", dd.depths)
+    damage_frac = dd.damages
+    Interpolations.LinearInterpolation(
+        depth_ft,
+        damage_frac;
+        extrapolation_bc=Interpolations.Flat(),
+    )
+end
+
+let
+    dmg_fn(x) = itp(ustrip.(u"ft", x))
+    dmg_fn.([3.1u"ft", 2.2u"m", 91.4u"inch"])
+end
+
+function get_depth_damage_function(
+    depth_train::Vector{<:T}, dmg_train::Vector{<:AbstractFloat}
+) where {T<:Unitful.Length}
+
+    # interpolate
+    depth_ft = ustrip.(u"ft", depth_train)
+    interp_fn = Interpolations.LinearInterpolation(
+        depth_ft,
+        dmg_train;
+        extrapolation_bc=Interpolations.Flat(),
+    )
+
+    damage_fn = function (depth::T2) where {T2<:Unitful.Length}
+        return interp_fn(ustrip.(u"ft", depth))
+    end
+    return damage_fn
+end
+
+damage_fn = get_depth_damage_function(dd.depths, dd.damages)
+
+p = let
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft"))
+    damages = damage_fn.(depths)
+    scatter(
+        depths,
+        damages;
+        xlabel="Flood Depth",
+        ylabel="Damage (%)",
+        label="$(dd.description) ($(dd.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        linewidth=2,
+    )
+end
+p
+```
+
+```{julia}
+gauge_dist = GeneralizedExtremeValue(5, 1.5, 0.1)
+quantile.(gauge_dist, [0.5, 0.9, 0.99, 0.999])
+
+p1 = plot(
+    gauge_dist;
+    label="Gauge Distribution",
+    xlabel="Water Level (ft)",
+    ylabel="Probability Density",
+    legend=:topright,
+    linewidth=2,
+)
+
+offset = 9.18
+hazard_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ)
+
+plot!(p1, hazard_dist; label="Hotel Distribution", linewidth=2)
+
+```
 
 # Expected annual damages
+```{julia}
+using Random
+using Unitful: ustrip
 
+function monte_carlo_expected_damage(depth_damage_function, hazard_distribution, N)
+    damages = Float64[] 
+    for _ in 1:N
+        # Sample a value from the hazard distribution
+        hazard_sample= rand(hazard_distribution)* u"ft"
+        typeof(hazard_sample)
+        
+        # Estimate damage using the depth-damage function
+        damage = depth_damage_function(hazard_sample)
+        
+       push!(damages, damage)
+    end
+    
+    expected_damage = mean(damages)
+    return expected_damage
+end
+
+# Call the Monte Carlo function
+N = 1000000  # Number of Monte Carlo samples
+expected_damage = monte_carlo_expected_damage(damage_fn, hazard_dist, N)
+println("Expected Annual Damages: ", expected_damage)
+
+```
 # Discussion
+```{julia}
+#Galveston Pier 21, TX
+#Harbor House Hotel
+#Estimated Elevation: 9.18 ft
+#I selected my depth-damage function based on the location and use of the building (hotel) to accurately estimate the damages that would occur in my chosen site.
+
+#For every incremental increase in flood depth, there is a corresponding increase in damage.
+
+#One million scenarios of flooding are simulated through taking the samples, and the depth of flooding accounting for the offset is plugged into the depth-damage function, generating an estimated damage percentage. The average percentage through those million samples becomes the expected damage.
+
+```
